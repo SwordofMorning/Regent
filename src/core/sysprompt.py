@@ -3,23 +3,27 @@
  # @date 2026/08/05
  #
  # @brief System Prompt Builder.
- # Dynamically assembles the system prompt: identity, sub-agent rules,
- # skills catalog, security/language policies, memories and session task state.
+ # Assembles the STATIC system prompt: identity, sub-agent rules, skills
+ # catalog, security/language policies and the memory system guide.
+ #
+ # @note Dynamic content (memory index / relevant memories / task state) is
+ #       NOT assembled here: it is injected as a "[System: Dynamic Context]"
+ #       block appended to the newest plain-text user message (see
+ #       MyAgent._inject_dynamic_context), so the system prompt stays
+ #       byte-identical for the whole session and DeepSeek's prefix cache
+ #       keeps hitting across tool-loop iterations.
  #
  # @note Prompt assembly call chain:
  #   MyAgent.step()
- #     -> PromptBuilder.build()
- #     -> skill.get_catalog()            # Available Skills
- #     -> memory.get_index_text()        # Relevant Memories (both tiers)
- #     -> _resolve_state_file()          # Current Task State (session-scoped)
- #     -> _get_memories() tail injection # dynamic memories appended by agent
+ #     -> PromptBuilder.build()            # STATIC system prompt
+ #     -> MyAgent._inject_dynamic_context()# dynamic block -> newest user msg
+ #       -> memory.get_index_text()        # Relevant Memories (both tiers)
+ #       -> memory.load_memories_string()  # <relevant_memories> digest
+ #       -> PromptBuilder.render_task_state_text()  # Attention Anchor
  #
 
-import os
-import json
 import platform
 import shutil
-import datetime
 
 ##
  # @brief System Prompt Builder.
@@ -57,42 +61,22 @@ class PromptBuilder:
     # End-def
 
     ##
-     # @brief Resolve the current session's task_state.json. i.e. "target".
+     # @brief Build the STATIC system prompt (identity, env, sub-agent rules,
+     #        skills catalog, security/language policies, memory guide).
      #
-     # @note Task state is session-scoped only: the legacy global task state
-     # (llm/task/task_state.json) was removed, so there is NO fallback here.
-     # When the file does not exist yet, ask the SessionManager to create a
-     # blank one (ensure_task_state_file); returns None when no active
-     # session is bound so callers can skip the section.
-     #
-     # @return Absolute path of task_state.json (created blank if missing);
-     #         None if no session manager / no active session.
-     #
-    def _resolve_state_file(self):
-        if self.session_manager is not None:
-            return self.session_manager.ensure_task_state_file()
-        return None
-    # End-def
-
-    ##
-     # @brief Dynamic build system prompt.
+     # @note Dynamic content (task state / memories) is injected by the agent
+     #       into the newest plain-text user message instead (see
+     #       MyAgent._inject_dynamic_context), so this prompt NEVER changes
+     #       within a session -> DeepSeek prefix cache stays valid.
      #
      # @return System prompt string.
      #
     def build(self):
         sections = []
-        
-        # 0. Generate timezone-aware current time to ground the LLM's knowledge
-        # Get aware datetime using UTC then convert to local timezone
-        now = datetime.datetime.now(datetime.timezone.utc).astimezone()
-        # Format example: "Friday, July 31, 2026 at 09:35 AM SGT (UTC+0800)"
-        time_str = now.strftime("%A, %B %d, %Y at %I:%M %p %Z (UTC%z)")
-
-        # 1. Identity & Environment
+        # 1. Identity
         sections.append("You are a professional coding and management agent running locally.")
-        sections.append(f"Current System Time: {time_str}. Please base any time-sensitive reasoning on this date.")
         sections.append(f"Environment Info:\n{self.terminal_hint}")
-        
+
         # 2. SubAgent, if enable SUB_LIST, must palnt first
         sub_list = self.config.get("SUB_LIST", [])
         if sub_list:
@@ -160,56 +144,57 @@ class PromptBuilder:
             "3. Applies to user-facing summaries and code-explanation answers."
         )
 
-        # 7. Memories (index). Kept AFTER static sections on purpose:
-        #    memory index changes when 'remember' is called, so it must stay in
-        #    the tail region of the system prompt to preserve prefix caching.
-        #    The index combines the global tier (project-wide) and the current
-        #    session tier (branch-local) — see MemoryManager.get_index_text().
-        index = self.memory.get_index_text()
-        if index:
-            sections.append(
-                f"Relevant Memories:\n{index}\n"
-                "Respect user preferences from memory. Use the 'remember' tool with "
-                "scope='global' for project-wide facts, or scope='session' for facts "
-                "that only apply to the current session branch."
-            )
-        # End-if
-
-        # 8. Target/Task State and Attention Management
-        state_file = self._resolve_state_file()
-        if state_file and os.path.exists(state_file):
-            try:
-                with open(state_file, "r", encoding="utf-8") as f:
-                    state = json.load(f)
-                if not isinstance(state, dict):
-                    raise ValueError("task state is not a JSON object")
-
-                def _coerce_list(value):
-                    """Safely render todos/completed: null -> '', list -> joined
-                    strings, anything else (e.g. a bare string) -> str(value)."""
-                    if value is None:
-                        return ""
-                    if isinstance(value, list):
-                        return ", ".join(str(x) for x in value if x is not None)
-                    return str(value)
-
-                session_hint = ""
-                if self.session_manager is not None and getattr(self.session_manager, "current_session_id", None):
-                    session_hint = f" (session: {self.session_manager.current_session_id})"
-                state_str = (
-                    "## Current Task State (Attention Anchor)"
-                    f"{session_hint}\n"
-                    f"- Target: {state.get('target', 'None')}\n"
-                    f"- Pending TODOs: {_coerce_list(state.get('todos'))}\n"
-                    f"- Completed: {_coerce_list(state.get('completed'))}\n"
-                    "(You must frequently use the 'update_state' tool to keep this updated)"
-                )
-                sections.append(state_str)
-            except Exception as e:
-                # Log failure details instead of silently dropping the section.
-                print(f"[-] Warning: Failed to load task state from {state_file}: {e}")
-        # End-if
+        # 7. Memory System Guide (static, cache-friendly)
+        #    Dynamic content (memory index / relevant memories / task state)
+        #    is injected as a "[System: Dynamic Context]" block appended to
+        #    the newest plain-text user message (see MyAgent._inject_dynamic_
+        #    context) instead of the system prompt. Keeping this prompt
+        #    byte-identical for the whole session preserves the prefix cache.
+        sections.append(
+            "Memory System:\n"
+            "1. You have a persistent memory system (global tier + session tier).\n"
+            "2. Relevant memories and the current task state are auto-injected "
+            "as a [System: Dynamic Context] block appended to the latest user "
+            "message. Treat it as system context, not user input.\n"
+            "3. Use the 'remember' tool (scope='global' or 'session') to persist "
+            "facts; use 'update_state' to keep target/todos/completed current."
+        )
 
         return "\n\n".join(sections)
     # End-def build
+
+    ##
+     # @brief Render the Task State block text (Attention Anchor).
+     #
+     # @note Used by MyAgent._inject_dynamic_context() to build the dynamic
+     #       [System: Dynamic Context] block appended to the newest plain-text
+     #       user message. Kept here (instead of inline in the agent) so both
+     #       the system prompt and the dynamic block share one rendering rule.
+     #
+     # @param state Task state dict loaded from task_state.json.
+     # @param session_hint Optional " (session: xxx)" suffix.
+     #
+     # @return Rendered multi-line block text (without the [System: ...] header).
+     #
+    @staticmethod
+    def render_task_state_text(state, session_hint=""):
+        def _coerce_list(value):
+            """Safely render todos/completed: null -> '', list -> joined
+            strings, anything else (e.g. a bare string) -> str(value)."""
+            if value is None:
+                return ""
+            if isinstance(value, list):
+                return ", ".join(str(x) for x in value if x is not None)
+            return str(value)
+        # End-def
+
+        return (
+            "## Current Task State (Attention Anchor)"
+            f"{session_hint}\n"
+            f"- Target: {state.get('target', 'None')}\n"
+            f"- Pending TODOs: {_coerce_list(state.get('todos'))}\n"
+            f"- Completed: {_coerce_list(state.get('completed'))}\n"
+            "(You must frequently use the 'update_state' tool to keep this updated)"
+        )
+    # End-def
 #End-class

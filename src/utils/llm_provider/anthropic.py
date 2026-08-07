@@ -39,8 +39,8 @@ class AnthropicProvider(LLMProvider):
             api_key=api_key,
             base_url=base_url if base_url else None,
             default_headers={
-                "HTTP-Referer": "https://github.com/SwordofMorning/Regent",
-                "X-Title": "Regent"
+                "HTTP-Referer": "https://github.com/SwordofMorning/Dandelion",
+                "X-Title": "Dandelion"
             }
         )
         self.model_id = model_id

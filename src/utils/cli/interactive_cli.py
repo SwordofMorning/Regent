@@ -2,7 +2,7 @@
  # @file src/utils/cli/interactive_cli.py
  # @date 2026/08/04
  # 
- # @brief Interactive CLI for Regent.
+ # @brief Interactive CLI for Dandelion.
  #
 
 import os
@@ -28,7 +28,7 @@ except ImportError:
 from .cli_printer import CLIPrinter
 
 ##
- # @brief Interactive CLI for Regent workspace management.
+ # @brief Interactive CLI for Dandelion workspace management.
  #
 class InteractiveCLI:
     ##
@@ -41,7 +41,7 @@ class InteractiveCLI:
         # Assignment object.
         self.agent = agent_instance
         self.session = session_manager
-        # @note This will clear staged message when you exit Regent without commit, which have no save function.
+        # @note This will clear staged message when you exit Dandelion without commit, which have no save function.
         self.staged_message = ""
         # Init printer.
         self.cli = CLIPrinter()
@@ -99,7 +99,7 @@ class InteractiveCLI:
      #
     def _print_help(self):
         help_text = (
-            f"{self.cli.C_CYAN}\n================= REGENT WORKSPACE ================={self.cli.C_RESET}\n"
+            f"{self.cli.C_CYAN}\n================= WORKSPACE ================={self.cli.C_RESET}\n"
             " Git-Style Session Management:\n"
             "   branch -a             : List all available sessions.\n"
             "   branch -d <name/id>   : Delete one session.\n"
@@ -262,7 +262,7 @@ class InteractiveCLI:
         # End-if
 
         # Create temporary file for drafting
-        fd, tmp_path = tempfile.mkstemp(suffix=".md", prefix="regent_draft_", text=True)
+        fd, tmp_path = tempfile.mkstemp(suffix=".md", prefix="dandelion_draft_", text=True)
         try:
             with os.fdopen(fd, 'w', encoding='utf-8') as f:
                 f.write(self.staged_message)
@@ -386,7 +386,7 @@ class InteractiveCLI:
      # Send message to LLM.
      #
     def run(self):
-        self.cli.raw(f"\n{self.cli.C_CYAN}================ REGENT SHELL READY ================{self.cli.C_RESET}")
+        self.cli.raw(f"\n{self.cli.C_CYAN}================ SHELL READY ================{self.cli.C_RESET}")
 
         # Try to load HAS_PTK (tab completion)
         if HAS_PTK:
@@ -436,7 +436,7 @@ class InteractiveCLI:
                 dirty_flag = "*" if self.staged_message.strip() else ""
 
                 # Fetch model name and format it to be clean (e.g. "nvidia/nemotron" -> "nemotron")
-                full_model_name = self.agent.config.get("MODEL_ID", "regent")
+                full_model_name = self.agent.config.get("MODEL_ID", "dandelion")
                 short_model_name = full_model_name.split("/")[-1] if "/" in full_model_name else full_model_name
 
                 # Linux-Style Colored Prompt Formatting
@@ -484,7 +484,7 @@ class InteractiveCLI:
                 if command in ['help', '-h']:
                     self._print_help()
                 elif command in ['quit', 'exit', '-q']:
-                    self.cli.info("Terminating Regent Shell. Goodbye.")
+                    self.cli.info("Terminating Dandelion Shell. Goodbye.")
                     break
                 elif command == 'branch':
                     self._cmd_branch(args)
@@ -512,7 +512,7 @@ class InteractiveCLI:
                 self.cli.raw("")
                 continue
             except EOFError:
-                self.cli.info("\nTerminating Regent Shell (EOF). Goodbye.")
+                self.cli.info("\nTerminating Dandelion Shell (EOF). Goodbye.")
                 break
             except Exception as e:
                 consecutive_errors += 1

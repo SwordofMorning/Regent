@@ -18,8 +18,12 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
-# Regent runtime file
+# Dandelion runtime file
 llm/memory/
 
 # Agent Playground
 playground/
+# Build artifacts
+build/
+.nuitka-cache/
+mk/lib/build_info.py

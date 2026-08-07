@@ -1,0 +1,236 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - "v*"
+    branches:
+      - "main"
+      - "master"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  # 1. Meta Job: Calculate version number and tag information
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.set_tag.outputs.tag }}
+      is_release: ${{ steps.set_tag.outputs.is_release }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: set_tag
+        run: |
+          is_release=${{ startsWith(github.ref, 'refs/tags/v') }}
+          tag=$(git describe --tags --match "v*" ${{ github.ref }} || true)
+
+          # If no tag is provided, generate a date-based development version number.
+          if [[ $tag != v* ]]; then
+            tag="v0.0.0-dev-$(date +%y%m%d)-$(git rev-parse --short HEAD)"
+          fi
+
+          # If it is not triggered by a formal release, add the ci suffix.
+          if ! $is_release ; then
+             tag="${tag}-ci"
+          fi
+
+          echo "Computed Tag: $tag"
+          echo "Is Release: $is_release"
+
+          echo "tag=$tag" >> $GITHUB_OUTPUT
+          echo "is_release=$is_release" >> $GITHUB_OUTPUT
+
+  # 2. Build Job: Build Matrix (Ubuntu x86_64 / Ubuntu arm64 / Windows x86_64)
+  build:
+    needs: meta
+    name: Build ${{ matrix.os_name }} ${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Ubuntu x86_64
+          - os: ubuntu-latest
+            os_name: linux
+            arch: x86_64
+          # Ubuntu arm64
+          - os: ubuntu-24.04-arm
+            os_name: linux
+            arch: aarch64
+          # Windows x86_64
+          - os: windows-latest
+            os_name: win
+            arch: x86_64
+
+    # Set up cross-platform sccache directory
+    env:
+      SCCACHE_DIR: ${{ github.workspace }}/.sccache
+      SCCACHE_CACHE_SIZE: "2G"
+      NUITKA_CCACHE_BINARY: sccache
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # === Cache Mechanism for Python Dependencies ===
+      # 1. Create
+      - name: Create Virtual Environment
+        run: python -m venv venv
+
+      # 2. Activate (Add venv bin dir to PATH)
+      - name: Activate Virtual Environment
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" == "Windows" ]; then
+            echo "${{ github.workspace }}/venv/Scripts" >> "$GITHUB_PATH"
+          else
+            echo "${{ github.workspace }}/venv/bin" >> "$GITHUB_PATH"
+          fi
+
+      # 3. Cache
+      - name: Cache Virtual Environment
+        id: cache-venv
+        uses: actions/cache@v4
+        with:
+          path: venv
+          key: venv-${{ matrix.os_name }}-${{ matrix.arch }}-${{ hashFiles('pyproject.toml') }}
+          restore-keys: |
+            venv-${{ matrix.os_name }}-${{ matrix.arch }}-
+
+      # 4. Install Deps (if cache misses)
+      - name: Install Dependencies
+        if: steps.cache-venv.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      # === Install and configure SCCACHE (Cross-Platform) ===
+      - name: Run sccache-cache
+        uses: mozilla-actions/sccache-action@v0.0.6
+        with:
+          version: "v0.8.1"
+      
+      - name: Cache SCCACHE & Nuitka Artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            .nuitka-cache
+            ${{ github.workspace }}/.sccache
+          key: build-cache-v2-${{ matrix.os_name }}-${{ matrix.arch }}-${{ hashFiles('pyproject.toml', 'mk/make.py', 'mk/config/build.config') }}-${{ github.sha }}
+          restore-keys: |
+            build-cache-v2-${{ matrix.os_name }}-${{ matrix.arch }}-${{ hashFiles('pyproject.toml', 'mk/make.py', 'mk/config/build.config') }}-
+            build-cache-v2-${{ matrix.os_name }}-${{ matrix.arch }}-
+
+      # === Make ===
+      - name: Build with Nuitka
+        shell: bash
+        run: |
+          export NUITKA_CCACHE_BINARY=$SCCACHE_PATH
+          python mk/make.py all
+
+      # === Print SCCACHE Stats ===
+      - name: SCCACHE Stats
+        shell: bash
+        run: sccache --show-stats
+
+      # === Prepare Artifact ===
+      - name: Prepare Artifact
+        shell: bash
+        run: |
+          ARTIFACT_NAME="dandelion-${{ matrix.os_name }}-${{ matrix.arch }}"
+          mkdir -p upload_stage
+
+          # Copy build artifact to upload directory
+          if [ -d "build/dandelion" ]; then
+            cp -r build/dandelion "upload_stage/$ARTIFACT_NAME"
+          else
+            echo "Error: Build artifact not found in build/dandelion!"
+            ls -R build
+            exit 1
+          fi
+
+          # Add version info
+          echo "Version: ${{ needs.meta.outputs.tag }}" > "upload_stage/$ARTIFACT_NAME/version.txt"
+
+          # Verify top-level layout (hidden dirs and fake entry must survive)
+          echo "=== Top-level layout ==="
+          ls -la "upload_stage/$ARTIFACT_NAME"
+          echo "=== bin/ ==="
+          ls "upload_stage/$ARTIFACT_NAME/bin"
+
+      # === Smoke Test (fake entry + path resolution) ===
+      - name: Smoke Test
+        shell: bash
+        run: |
+          cd "upload_stage/dandelion-${{ matrix.os_name }}-${{ matrix.arch }}"
+          if [ "$RUNNER_OS" == "Windows" ]; then
+            OUT=$(timeout 60 cmd //c dandelion.cmd < /dev/null 2>&1 || true)
+          else
+            # Unset LD_LIBRARY_PATH etc.: a foreign libpython from the runner
+            # environment would be loaded before the bundled one and crash.
+            OUT=$(env -u LD_LIBRARY_PATH -u PYTHONHOME -u PYTHONPATH timeout 60 ./dandelion.sh < /dev/null 2>&1 || true)
+          fi
+          echo "$OUT" | head -5
+          echo "$OUT" | grep -q "Initializing Dandelion Project" || { echo "[-] Smoke failed: entry did not start"; echo "$OUT"; exit 1; }
+          echo "$OUT" | grep -qE "Agent Initialization Successful|Failed to load config" || { echo "[-] Smoke failed: unexpected runtime output"; echo "$OUT"; exit 1; }
+          echo "[+] Smoke OK: fake entry works, runtime path resolved"
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dandelion-${{ matrix.os_name }}-${{ matrix.arch }}
+          path: upload_stage
+          include-hidden-files: true
+
+  # 3. Release Job: Release And Upload Assets
+  release:
+    needs: [meta, build]
+    if: needs.meta.outputs.is_release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Zip Artifacts
+        run: |
+          mkdir -p release_assets
+          cd artifacts
+
+          # Iterate through each downloaded artifact directory
+          for dir in */; do
+            dir=${dir%*/} # remove trailing slash
+            echo "Processing $dir..."
+
+            # Construct the final zip name: name-os-arch-version.zip
+            zip_name="${dir}-${{ needs.meta.outputs.tag }}.zip"
+
+            # Enter directory and zip content (-y preserves symlinks)
+            (cd "$dir" && zip -r -y "../../release_assets/$zip_name" .)
+          done
+
+          echo "Assets to upload:"
+          ls -l ../release_assets
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.meta.outputs.tag }}
+          name: Release ${{ needs.meta.outputs.tag }}
+          files: release_assets/*
+          draft: false
+          prerelease: false
+          generate_release_notes: true

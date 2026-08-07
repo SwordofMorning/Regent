@@ -31,7 +31,8 @@ class StateTool(BaseTool):
             "Update the current task state, including the main target and TODO lists. "
             "This state is scoped to the current session branch "
             "(stored at .log/sess_<id>/task_state.json) and is injected into the "
-            "system prompt on every turn to keep you focused."
+            "conversation as part of the [System: Dynamic Context] block appended "
+            "to the latest user message, to keep you focused on the current task."
         )
 
     def get_schema(self):
@@ -96,6 +97,16 @@ class StateTool(BaseTool):
             return any(ord(ch) > 127 for v in value for ch in str(v or ""))
         return any(ord(ch) > 127 for ch in str(value or ""))
 
+    @staticmethod
+    def _coerce_list(value):
+        """Safely render todos/completed: null -> '', list -> joined
+        strings, anything else (e.g. a bare string) -> str(value)."""
+        if value is None:
+            return ""
+        if isinstance(value, list):
+            return ", ".join(str(x) for x in value if x is not None)
+        return str(value)
+
     def execute(self, **kwargs):
         # Session-scoped only: without an active session there is no place to
         # persist task state. Fail loudly instead of writing a global file
@@ -133,4 +144,14 @@ class StateTool(BaseTool):
             # disk, permission errors) surface as a tool error instead of
             # crashing the whole agent turn.
             return False, f"Error: failed to write task state: {e}"
-        return True, "Task state updated successfully. It will be reflected in your next turn."
+        # Echo the merged state back so the model sees it immediately in the
+        # tool result (fresh region, cache-friendly). Mid-tool-loop the
+        # [System: Dynamic Context] block is only refreshed at user turns, so
+        # this echo is what keeps the updated anchor visible right after
+        # update_state() without re-injecting into the messages prefix.
+        return True, (
+            "Task state updated:\n"
+            f"- Target: {state.get('target', 'None')}\n"
+            f"- Pending TODOs: {self._coerce_list(state.get('todos'))}\n"
+            f"- Completed: {self._coerce_list(state.get('completed'))}"
+        )

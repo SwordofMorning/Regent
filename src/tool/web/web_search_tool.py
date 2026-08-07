@@ -1,6 +1,6 @@
 # src/tool/web/web_search_tool.py
 """
-Web Search Tool for Regent Agent using Tavily API.
+Web Search Tool for Dandelion Agent using Tavily API.
 
 This tool provides robust, AI-optimized web search capabilities.
 It returns clean snippets and content without the need for manual HTML scraping,

@@ -2,7 +2,7 @@
  # @file src/utils/__init__.py
  # @date 2026/08/04
  # 
- # @brief Provides utilities for the Regent agent.
+ # @brief Provides utilities for the Dandelion agent.
  #
 
 # CLI utilities

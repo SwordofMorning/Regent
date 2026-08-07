@@ -3,7 +3,7 @@
  # @date 2026/08/05
  # 
  # @brief Logging Package.
- # Provides logging utilities for the Regent agent.
+ # Provides logging utilities for the Dandelion agent.
  #
 
 from .logger import AgentLogger
